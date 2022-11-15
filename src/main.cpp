@@ -1,17 +1,17 @@
 #include <ESP8266WebServer.h>
 #include <EEPROM.h>
 #include "EspMQTTClient.h"
+#include "ArduinoJson.h"
+#include "commands.h"
 
 #define SERIE_NUMBER "abcdef123456789"
 
 #define CONFIG_START 32        // position in EEPROM where our first byte gets written
-#define CONFIG_VERSION "00003" // version string to let us compare current to whatever is in EEPROM
+#define CONFIG_VERSION "00001" // version string to let us compare current to whatever is in EEPROM
 
 typedef struct
 {
-    char version[6];   // Version of the configuration in EEPROM, used in case we change the struct
     uint8_t debug;     // Debug on yes/no 1/0
-    uint8_t saved;     // WiFi config saved yes/no 1/0
     char nodename[32]; // this node name
     char ssid[32];     // WiFi SSID
     char password[64]; // WiFi Password
@@ -22,9 +22,7 @@ typedef struct
 } configuration_t;
 
 configuration_t CONFIGURATION = {
-    CONFIG_VERSION,
     1,
-    0,
     SERIE_NUMBER,
     "",
     "",
@@ -112,39 +110,58 @@ const char MAIN_page[] PROGMEM = R"=====(
 const char *ssid = "Medicare IoT"; // Nome da rede WiFi que será criada
 const char *password = "medicare";      // Senha para se conectar nesta rede
 
+int operationMode = 1;
+
 EspMQTTClient client;
 
 ESP8266WebServer server(80);
 
-int loadConfig()
+void loadConfig()
 {
-    int returnValue = 0;
-    EEPROM.begin(sizeof(configuration_t) + CONFIG_START);
-
-    if (EEPROM.read(CONFIG_START + 0) == CONFIG_VERSION[0] &&
-        EEPROM.read(CONFIG_START + 1) == CONFIG_VERSION[1] &&
-        EEPROM.read(CONFIG_START + 2) == CONFIG_VERSION[2] &&
-        EEPROM.read(CONFIG_START + 3) == CONFIG_VERSION[3] &&
-        EEPROM.read(CONFIG_START + 4) == CONFIG_VERSION[4])
-    {
-        EEPROM.get(CONFIG_START, CONFIGURATION);
-        returnValue = 1;
-    }
-    CONFIGURATION.saved = 0;
-
+    EEPROM.begin(sizeof(configuration_t));
+    EEPROM.get(0, CONFIGURATION);
     EEPROM.end();
-    return returnValue;
 }
 
 void saveConfig()
 {
-    EEPROM.begin(sizeof(configuration_t) + CONFIG_START);
-
-    CONFIGURATION.saved = 1;
-    EEPROM.put(CONFIG_START, CONFIGURATION);
+    EEPROM.begin(sizeof(configuration_t));
+    EEPROM.put(0, CONFIGURATION);
     EEPROM.commit();
-
     EEPROM.end();
+}
+
+void executeCommand(String payload)
+{
+    int commandResult = 0;
+
+    StaticJsonDocument<1024> doc;
+    deserializeJson(doc, payload);
+    String hash = doc["hash"];
+    String command = doc["command"];
+
+    if (command.equals("blinkled"))
+        commandResult = blinkLed(atoi(doc["times"]), atoi(doc["delay"]));
+
+    char COMMAND_RESPONSE_TOPIC[60];
+    sprintf(COMMAND_RESPONSE_TOPIC, "medicare/%s/command/result", SERIE_NUMBER);
+
+    char commandResponse[1024];
+    if (commandResult == 1)
+        sprintf(commandResponse, "{\"hash\":\"%s\",\"result\":\"ok\"}", hash.c_str());
+    else if (commandResult == 2)
+        sprintf(commandResponse, "{\"hash\":\"%s\",\"result\":\"error in parameters\"}", hash.c_str());
+    else
+        sprintf(commandResponse, "{\"hash\":\"%s\",\"result\":\"error\"}", hash.c_str());
+
+    client.publish(COMMAND_RESPONSE_TOPIC, commandResponse);
+}
+
+void updateValues()
+{
+    char VALUES_TOPIC[60];
+    sprintf(VALUES_TOPIC, "medicare/%s/values", SERIE_NUMBER);
+    client.publish(VALUES_TOPIC, "{\"temperature\":\"36.5\"}");
 }
 
 void onConnectionEstablished()
@@ -152,7 +169,9 @@ void onConnectionEstablished()
     char COMMAND_TOPIC[60];
     sprintf(COMMAND_TOPIC, "medicare/%s/command", SERIE_NUMBER);
     client.subscribe(COMMAND_TOPIC, [](const String &payload)
-                     { Serial.println(payload); });
+    {
+        executeCommand(payload);
+    });
 
     char VALUES_TOPIC[60];
     sprintf(VALUES_TOPIC, "medicare/%s/values", SERIE_NUMBER);
@@ -161,20 +180,17 @@ void onConnectionEstablished()
 
 String listSSID()
 {
-    String index = (const __FlashStringHelper *)MAIN_page; // Leia o conteúdo HTML
+    String index = (const __FlashStringHelper *)MAIN_page;
     String networks = "";
     int n = WiFi.scanNetworks();
-    Serial.println("Scan done.");
     if (n == 0)
     {
-        Serial.println("Nenhuma rede encontrada.");
         index.replace("<select class='text-field' name='ssid'></select>", "<select class='text-field' name='ssid'><option value='' disabled selected>Nenhuma rede encontrada</option></select>");
         index.replace("<br><br>", "<p id='status' style='color:red;'>Rede não encontrada.</p>");
         return index;
     }
     else
     {
-        Serial.printf("%d networks found.\n", n);
         networks += "<select class='text-field' name='ssid'><option value='' disabled selected>SSID</option>";
         for (int i = 0; i < n; ++i)
         {
@@ -194,6 +210,8 @@ void handleRoot()
 
 void startMqttClient()
 {
+    digitalWrite(1, HIGH);
+
     if (CONFIGURATION.debug)
         client.enableDebuggingMessages();
 
@@ -206,8 +224,6 @@ void handleForm()
 {
     String ssidWifi = server.arg("ssid");
     String passwordWifi = server.arg("password");
-    Serial.printf("SSID: %s\n", ssidWifi.c_str());
-    Serial.printf("Password: %s\n", passwordWifi.c_str());
     if (!ssidWifi.equals("") && !passwordWifi.equals(""))
     {
         memset(CONFIGURATION.ssid, 0, sizeof(CONFIGURATION.ssid));
@@ -215,6 +231,7 @@ void handleForm()
         memset(CONFIGURATION.password, 0, sizeof(CONFIGURATION.password));
         strcpy(CONFIGURATION.password, passwordWifi.c_str());
         saveConfig();
+        operationMode = 1;
         startMqttClient();
     }
 }
@@ -225,33 +242,40 @@ void startWebServer()
     server.on("/connect", handleForm);
     server.begin();
 
-    Serial.println("Servidor HTTP iniciado");
 }
 
 void startAccessPoint()
 {
     WiFi.softAP(ssid, password);
-    Serial.print("Access Point \"");
-    Serial.print(ssid);
-    Serial.println("\" started");
-    Serial.print("IP address:\t");
-    Serial.println(WiFi.softAPIP());
 }
 
 void setup()
 {
-    Serial.begin(115200);
-    delay(2000);
+    pinMode(0, INPUT);
+    pinMode(1, OUTPUT);
+    digitalWrite(1, HIGH);
 
-    if (!loadConfig())
-        saveConfig();
+    delay(3000);
 
-    if (CONFIGURATION.saved)
-    {
-        Serial.printf("Starting MQTT %d\n", CONFIGURATION.saved);
+    operationMode = digitalRead(0);
+
+    if (operationMode) {
+        loadConfig();
         startMqttClient();
-    } else
-    {
+    } else {
+        digitalWrite(1, LOW);
+        delay(300);
+        digitalWrite(1, HIGH);
+        delay(300);
+        digitalWrite(1, LOW);
+        delay(300);
+        digitalWrite(1, HIGH);
+        delay(300);
+        digitalWrite(1, LOW);
+        delay(300);
+        digitalWrite(1, HIGH);
+        delay(300);
+        digitalWrite(1, LOW);
         startAccessPoint();
         startWebServer();
     }
@@ -259,7 +283,14 @@ void setup()
 
 void loop()
 {
-    server.handleClient();
-    if (CONFIGURATION.saved)
+    if (operationMode)
         client.loop();
+    else
+    {
+        if (digitalRead(0))
+        {
+            updateValues();
+        }
+        server.handleClient();
+    }
 }
