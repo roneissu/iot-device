@@ -14,3 +14,8 @@ int blinkLed(int ledTimes, int delaySec)
     }
     return 1;
 }
+
+float getButtonValue()
+{
+    return 36.5;
+}

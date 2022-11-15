@@ -5,9 +5,12 @@
 #include "commands.h"
 
 #define SERIE_NUMBER "abcdef123456789"
+#define BASE_TOPIC "medicare/"
 
-#define CONFIG_START 32        // position in EEPROM where our first byte gets written
-#define CONFIG_VERSION "00001" // version string to let us compare current to whatever is in EEPROM
+#define VALUES_TOPIC            BASE_TOPIC "values/" SERIE_NUMBER
+#define VALUES_RESULT_TOPIC     BASE_TOPIC "valuesresult/" SERIE_NUMBER
+#define COMMAND_TOPIC           BASE_TOPIC "command/" SERIE_NUMBER
+#define COMMAND_RESULT_TOPIC    BASE_TOPIC "commandresult/" SERIE_NUMBER
 
 typedef struct
 {
@@ -143,9 +146,6 @@ void executeCommand(String payload)
     if (command.equals("blinkled"))
         commandResult = blinkLed(atoi(doc["times"]), atoi(doc["delay"]));
 
-    char COMMAND_RESPONSE_TOPIC[60];
-    sprintf(COMMAND_RESPONSE_TOPIC, "medicare/%s/command/result", SERIE_NUMBER);
-
     char commandResponse[1024];
     if (commandResult == 1)
         sprintf(commandResponse, "{\"hash\":\"%s\",\"result\":\"ok\"}", hash.c_str());
@@ -154,27 +154,29 @@ void executeCommand(String payload)
     else
         sprintf(commandResponse, "{\"hash\":\"%s\",\"result\":\"error\"}", hash.c_str());
 
-    client.publish(COMMAND_RESPONSE_TOPIC, commandResponse);
+    client.publish(COMMAND_RESULT_TOPIC, commandResponse);
 }
 
-void updateValues()
+void IRAM_ATTR updateValues()
 {
-    char VALUES_TOPIC[60];
-    sprintf(VALUES_TOPIC, "medicare/%s/values", SERIE_NUMBER);
-    client.publish(VALUES_TOPIC, "{\"temperature\":\"36.5\"}");
+    if (operationMode)
+    {
+        char temperature[40] = "";
+        sprintf(temperature, "{\"temperature\":\"%2.1f\"}", getButtonValue());
+        digitalWrite(1, LOW);
+        delay(300);
+        digitalWrite(1, HIGH);
+        client.publish(VALUES_TOPIC, temperature);
+    }
 }
 
 void onConnectionEstablished()
 {
-    char COMMAND_TOPIC[60];
-    sprintf(COMMAND_TOPIC, "medicare/%s/command", SERIE_NUMBER);
     client.subscribe(COMMAND_TOPIC, [](const String &payload)
     {
         executeCommand(payload);
     });
 
-    char VALUES_TOPIC[60];
-    sprintf(VALUES_TOPIC, "medicare/%s/values", SERIE_NUMBER);
     client.publish(VALUES_TOPIC, "Connected");
 }
 
@@ -263,22 +265,19 @@ void setup()
         loadConfig();
         startMqttClient();
     } else {
-        digitalWrite(1, LOW);
-        delay(300);
-        digitalWrite(1, HIGH);
-        delay(300);
-        digitalWrite(1, LOW);
-        delay(300);
-        digitalWrite(1, HIGH);
-        delay(300);
-        digitalWrite(1, LOW);
-        delay(300);
-        digitalWrite(1, HIGH);
-        delay(300);
+        for (int i = 0; i < 5; i++)
+        {
+            digitalWrite(1, LOW);
+            delay(100);
+            digitalWrite(1, HIGH);
+            delay(100);
+        }
         digitalWrite(1, LOW);
         startAccessPoint();
         startWebServer();
     }
+
+    attachInterrupt(digitalPinToInterrupt(0), updateValues, RISING);
 }
 
 void loop()
@@ -286,11 +285,5 @@ void loop()
     if (operationMode)
         client.loop();
     else
-    {
-        if (digitalRead(0))
-        {
-            updateValues();
-        }
         server.handleClient();
-    }
 }
